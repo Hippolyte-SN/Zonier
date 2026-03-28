@@ -135,6 +135,7 @@ Les classes obtenues sont réordonnées en fonction d’un indicateur métier (m
 * R(4.4.3)
 * tidyverse
 * dplyr
+* questionr
 * ggplot2
 * caret
 * gbm
