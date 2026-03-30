@@ -1,0 +1,268 @@
+---
+title: 'Lissage'
+author: "SANON Korossin"
+date: "06/03/2026"
+output:
+  html_notebook: 
+    number_sections: yes
+  pdf_document: 
+    number_sections: yes
+  html_document: 
+    number_sections: yes
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+library(dplyr)
+library(tidyr)
+library(cowplot)
+library(maps)
+library(classInt)
+library(ggplot2)
+```
+
+## Méthode de distance
+
+> Fonction distance
+
+```{r}
+distance_matrix <- function(lat, lon){
+  
+  rayon_terre <- 6371
+  lat <- lat * pi/180
+  lon <- lon * pi/180
+  n <- length(lat)
+  distance <- matrix(0, n, n)
+  
+  for(i in 1:n){
+    x <- sin(lat[i])*sin(lat) + cos(lat[i])*cos(lat)*cos(lon[i]-lon)
+    x <- pmin(1, pmax(-1, x)) # correction numérique
+    distance[i,] <- acos(x)*rayon_terre
+  }
+  
+  diag(distance) <- NA
+  distance
+}
+```
+
+
+> Fonction lissage
+
+```{r}
+lissage_distance <- function(data, a, p, m){
+  lat <- data$Latitude_barycentre
+  lon <- data$Longitude_barycentre
+  expo <- data$ExpositionBV
+  resid <- data$Residus
+  
+  # matrice de distance
+  D <- distance_matrix(lat, lon)
+  # poids distance
+  W <- 1 / (D^p)
+  W[is.infinite(W)] <- 0 # Si deux barycentres ont exactement les mêmes coordonnées
+  diag(W) <- 0 # car diag(distance) <- NA dans la fonction distance
+  
+  # calcul du risque collectif
+  num <- W %*% (resid * expo)
+  den <- W %*% expo
+  
+  ri_bar <- ifelse(den == 0, 0, num / den) # on évite les NA si les poids sont nuls
+  
+  # facteur de crédibilité
+  zi <- expo / (expo + a)
+  
+  # résidus lissés
+  res_lisse <- (zi^m) * resid + (1 - zi^m) * ri_bar
+  res_lisse
+}
+```
+
+
+## Calcul du barycentre des bassins de vie
+
+```{r}
+info_bv <- read.csv2("correspondance_code_insee_code_postal_codebv.csv")
+colnames(info_bv)[3] <- "CodeBV" # renommer "BV" en "CodeBV"
+
+info_bv <- info_bv %>%
+  select(codePostal, CodeBV, Population, geo_point_2d) %>%
+  separate(geo_point_2d, into=c("Latitude","Longitude"), sep=",") %>%
+  mutate(
+    Population = as.numeric(Population),
+    Latitude = as.numeric(Latitude),
+    Longitude = as.numeric(Longitude)
+  )
+```
+
+```{r}
+barycentre_bv <- info_bv %>%
+  group_by(CodeBV) %>%
+  summarise(
+    Latitude_barycentre = weighted.mean(Latitude, Population, na.rm=TRUE),
+    Longitude_barycentre = weighted.mean(Longitude, Population, na.rm=TRUE),
+    Population = sum(Population)
+  )
+
+barycentre_bv$CodeBV <- as.numeric(barycentre_bv$CodeBV)
+```
+
+
+## Calcul des résidus agrégés
+
+```{r}
+load("error_frame.RData")
+```
+
+Rappel : **RF et GBM** semblaient légèrement meilleurs
+
+```{r}
+base_res <- error_frame %>%
+  select(CodeBV, gbm) %>%
+  rename(Residus = gbm)
+
+res_agreg <- base_res %>%
+  group_by(CodeBV) %>%
+  summarise(
+    Residus = mean(Residus),
+    ExpositionBV = n()
+  ) %>%
+  left_join(barycentre_bv, by="CodeBV")
+
+# Hyperparametre a
+res_agreg$a <- 1 / res_agreg$ExpositionBV
+```
+
+
+## lissages
+
+```{r}
+params <- expand.grid(p = c(1, 1.5, 2), m = c(0.5, 1, 2))
+
+for(i in 1:nrow(params)){
+  
+  p <- params$p[i]
+  m <- params$m[i]
+  
+  nom <- paste0("Residus_lisses_",p,"_",m)
+  
+  res_agreg[[nom]] <- lissage_distance(res_agreg, res_agreg$a, p, m)
+}
+```
+
+
+## Representation des graphes
+
+```{r}
+fr <- map_data("france")
+
+p <- ggplot(fr, aes(long, lat, group = group)) + 
+  geom_polygon( color = "black", alpha = 0.4, show.legend = FALSE) + 
+  coord_quickmap() +
+  theme_void()
+```
+
+> Fonction pour automatiser les graphes
+
+```{r}
+breaks <- classIntervals(res_agreg$Residus, n = 6, style = "jenks")$brks
+
+plot_residus <- function(data, variable, titre){
+    p +
+    geom_point(
+      data=data,
+      aes(
+        Longitude_barycentre,
+        Latitude_barycentre,
+        color = cut(.data[[variable]],
+                    breaks = breaks,
+                    include.lowest = TRUE)
+      ),
+      size=2.5, 
+      inherit.aes = FALSE
+    ) +
+    scale_color_brewer(palette="Blues") +
+    ggtitle(titre) +
+    theme(legend.title = element_blank())
+}
+```
+
+> Graphes
+
+```{r}
+g_sans <- plot_residus(res_agreg, "Residus", "Résidus non lissés")
+
+g_1_05 <- plot_residus(res_agreg, "Residus_lisses_1_0.5", "p=1 m=0.5")
+g_1_1 <- plot_residus(res_agreg, "Residus_lisses_1_1", "p=1 m=1")
+g_1_2 <- plot_residus(res_agreg, "Residus_lisses_1_2", "p=1 m=2")
+
+plot_grid(g_sans, g_1_05, g_1_1, g_1_2, ncol=2)
+```
+
+```{r}
+g_15_05 <- plot_residus(res_agreg, "Residus_lisses_1.5_0.5", "p=1.5 m=0.5")
+g_15_1 <- plot_residus(res_agreg,"Residus_lisses_1.5_1","p=1.5 m=1")
+g_15_2 <- plot_residus(res_agreg,"Residus_lisses_1.5_2","p=1.5 m=2")
+
+plot_grid(g_sans, g_15_05, g_15_1, g_15_2, ncol=2)
+```
+
+```{r}
+g_2_05 <- plot_residus(res_agreg, "Residus_lisses_2_0.5", "p=2 m=0.5")
+g_2_1 <- plot_residus(res_agreg,"Residus_lisses_2_1","p=2 m=1")
+g_2_2 <- plot_residus(res_agreg,"Residus_lisses_2_2","p=2 m=2")
+
+plot_grid(g_sans, g_2_05, g_2_1, g_2_2, ncol=2)
+```
+
+
+Le **lissage** dépend des paramètres **p** et **m** :
+
+- **p** contrôle la **puissance de pondération spatiale** (plus p est grand, plus le lissage est fort).
+- **m** contrôle le **degré de voisinage / influence des points proches** (plus m est grand, plus on moyenne).
+
+Observation des cartes
+
+- **p = 1, m = 0.5 à 2** :  
+  Lissage **faible à modéré** beaucoup de variations locales visibles (carte assez bruitée).
+
+- **p = 1.5, m = 0.5 à 2** :  
+  Lissage **intermédiaire** les structures commencent à être plus homogènes.
+
+- **p = 2, m = 0.5 à 2** :  
+  Lissage **plus fort** la carte devient plus uniforme (moins de bruit local).
+
+**Le meilleur compromis :**
+
+Visuellement, le plus équilibré semble être `p=1.5,m=1` car :
+
+- structures spatiales visibles
+- pas trop de bruit local
+- pas de sur-lissage.
+
+
+## Modèle final
+
+```{r}
+res_agreg$Residus_lisses <- lissage_distance(res_agreg, res_agreg$a, p = 1.5, m = 1)
+```
+
+
+> Sauvegarde de la table pour la prochaine etape
+
+```{r}
+table_lissage <- res_agreg[,c("CodeBV", "Residus", "ExpositionBV", "Latitude_barycentre", "Longitude_barycentre", "Residus_lisses")]
+head(table_lissage)
+```
+
+```{r}
+save(table_lissage, file = "table_lissage.RData")
+```
+
+
+
+

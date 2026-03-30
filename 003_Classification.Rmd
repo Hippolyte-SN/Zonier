@@ -1,0 +1,399 @@
+---
+title: 'Classification'
+author: "SANON Korossin"
+date: "14/03/2026"
+output:
+  html_notebook: 
+    number_sections: yes
+  pdf_document: 
+    number_sections: yes
+  html_document: 
+    number_sections: yes
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+library(openxlsx)
+library(tidyr)
+library(dplyr)
+library(readr)
+library(FactoMineR)
+library(factoextra)
+library(stats)
+library(maps)
+library(ggplot2)
+```
+
+## Import des données externes par commune 2019
+
+> BPE 2019 - Base permanente des équipements : fonctions médicales et paramédicales
+
+```{r}
+com_fonct <- read.xlsx("Variables_externes.xlsx", sheet = 2, startRow = 5, colNames = TRUE)
+com_fonct <- com_fonct[- 1, ]
+```
+
+> BPE 2019 - Base permanente des équipements : services santé
+
+```{r}
+com_serv <- read.xlsx("Variables_externes.xlsx", sheet = 6, startRow = 5, colNames = TRUE)
+com_serv <- com_serv[- 1, ]
+```
+
+> Démographie par commune
+
+```{r}
+demo <- read.xlsx("Variables_externes.xlsx", sheet = 14, startRow = 1, colNames = TRUE) 
+```
+
+> Liste des bassins de vie au 1er Janvier 2020
+
+```{r}
+bv2012 <- read.xlsx("Variables_externes.xlsx", sheet = 16, startRow = 5, colNames = TRUE)
+bv2012 <- bv2012[- 1, ] 			
+```
+
+> Liste des commmunes au 1er Janvier 2020 avec des indicateurs
+
+```{r}
+com <- read.xlsx("Variables_externes.xlsx", sheet = 20, startRow = 5, colNames = TRUE)
+com <- com[- 1, ]
+```
+
+> Nettoyage et preparation : conversion des types (facteurs, numeriques)
+
+```{r}
+num_cols_fonct <- setdiff(names(com_fonct),
+                          c("CODGEO","Libellé.commune.ou.ARM","Région","Département"))
+
+com_fonct <- com_fonct %>%
+  mutate(across(all_of(num_cols_fonct), parse_number))
+```
+
+```{r}
+num_cols_serv <- setdiff(names(com_serv),
+                         c("CODGEO","Libellé.commune.ou.ARM","Région","Département"))
+
+com_serv <- com_serv %>%
+  mutate(across(all_of(num_cols_serv), parse_number))
+```
+
+> Composition communale
+
+```{r}
+tmp <- read.xlsx('Composition_communale.xlsx', sheet = 1, startRow = 6, colNames = TRUE)
+summary(tmp)
+tmp$CODGEO <- as.factor(tmp$CODGEO)
+tmp$BV2012 <- as.factor(tmp$BV2012)
+tmp_2 <- cbind.data.frame(tmp[,c(1,3)])
+colnames(tmp_2) <- c("CODGEO","BV2012")
+```
+
+> Relier chaque commune à un BV2012
+
+```{r}
+com2 <- com %>%
+  select(CODGEO, Population.en.2012) %>%
+  mutate(Population.en.2012 = as.double(Population.en.2012)) %>%
+  left_join(tmp_2, by="CODGEO")
+```
+
+```{r}
+data_fonct <- com2 %>%
+  left_join(com_fonct, by="CODGEO") %>%
+  drop_na()
+
+data_serv <- com2 %>%
+  left_join(com_serv, by="CODGEO") %>%
+  drop_na()
+
+data_demo <- com2 %>%
+  left_join(demo, by="CODGEO") %>%
+  drop_na()
+```
+
+## Agrégation au niveau bassin de vie : BV
+
+Offre de soins : densité par habitant
+**sum(variable)/sum(population)**
+
+```{r}
+data_fonct2 <- data_fonct %>%
+  group_by(BV2012) %>%
+  summarise(
+    Population.en.2012 = sum(Population.en.2012),
+    across(where(is.numeric) & !Population.en.2012,
+           ~ sum(.x) / sum(Population.en.2012))
+  )
+```
+
+```{r}
+data_serv2 <- data_serv %>%
+  group_by(BV2012) %>%
+  summarise(
+    Population.en.2012 = sum(Population.en.2012),
+    across(where(is.numeric) & !Population.en.2012,
+           ~ sum(.x) / sum(Population.en.2012))
+  )
+```
+
+Demographie : moyenne ponderee
+**sum(x*population)/sum(population)**
+
+```{r}
+vars_weighted <- c(
+"TX_F","TX_TOT_0A24","TX_F_0A24","TX_TOT_60ETPLUS","TX_F_60ETPLUS",
+"IND_JEUNE","TX_TOT_MEN1","TX_TOT_MEN6","TX_TOT_ET","TX_F_ET"
+)
+
+data_demo2 <- data_demo %>%
+  group_by(BV2012) %>%
+  summarise(
+    POP_MUN = sum(POP_MUN),
+    
+    across(where(is.numeric) & all_of(vars_weighted) & !POP_MUN,
+           ~ sum(.x * POP_MUN) / sum(POP_MUN)),
+    
+    across(where(is.numeric) & -c(POP_MUN, all_of(vars_weighted)),
+           ~ sum(.x) / sum(POP_MUN))
+  )
+```
+
+
+## ACP
+
+> ACP fonctions médicales
+
+```{r}
+res_fonct <- PCA(data_fonct2[,-1], scale.unit = T, 
+                 graph = F, row.w = data_fonct2$Population.en.2012)
+```
+
+```{r}
+get_eigenvalue(res_fonct)
+
+fviz_eig(res_fonct, addlabels = TRUE)
+
+fviz_pca_var(res_fonct)
+
+fviz_contrib(res_fonct, choice="var", axes=1)
+```
+
+
+> ACP services médicaux					
+
+```{r}
+res_serv <- PCA(data_serv2[,-c(1,2)], scale.unit = T, 
+                graph = F, row.w = data_serv2$Population.en.2012)
+```
+
+```{r}
+get_eigenvalue(res_serv)
+
+fviz_eig(res_serv, addlabels = TRUE)
+
+fviz_pca_var(res_serv)
+
+fviz_contrib(res_serv, choice="var", axes=1)
+```
+
+
+> ACP demographie 
+
+```{r}
+res_demo <- PCA(data_demo2[,3:28], scale.unit = T, graph = F, row.w = data_demo2$POP_MUN)
+```
+
+```{r}
+get_eigenvalue(res_demo)
+
+fviz_eig(res_demo, addlabels = TRUE)
+
+fviz_pca_var(res_demo)
+
+fviz_contrib(res_demo, choice="var", axes=1)
+```
+
+
+> Extraction des composantes principales
+
+```{r}
+c1_fonct <- get_pca_ind(res_fonct)$coord[,1:5]
+c1_serv  <- get_pca_ind(res_serv)$coord[,1:4]
+c1_demo  <- get_pca_ind(res_demo)$coord[,1:5]
+
+c1_fonct <- cbind.data.frame(data_fonct2$BV2012, c1_fonct)
+c1_serv  <- cbind.data.frame(data_serv2$BV2012, c1_serv)
+c1_demo  <- cbind.data.frame(data_demo2$BV2012, c1_demo)
+
+colnames(c1_fonct) <- c("BV2012","c1_fonct","c2_fonct","c3_fonct","c4_fonct","c5_fonct")
+colnames(c1_serv) <- c("BV2012","c1_serv","c2_serv","c3_serv","c4_serv")
+colnames(c1_demo) <- c("BV2012","c1_demo","c2_demo","c3_demo","c4_demo","c5_demo")
+```
+
+
+## classification
+
+```{r}
+load("table_lissage.RData")
+
+table_lissage$CodeBV <- factor(
+  ifelse(nchar(table_lissage$CodeBV) == 4,
+         paste0("0", table_lissage$CodeBV),
+         table_lissage$CodeBV)
+)
+```
+
+> Fusion finale
+
+```{r}
+table_cp <- Reduce(
+  function(x, y) merge(x, y, by = 1, all.x = TRUE),
+  list(table_lissage, c1_fonct, c1_serv, c1_demo)
+)
+```
+
+> Mise à l'échelle : moyenne pondérée
+`On rééquilibre l’importance relative entre les résidus lissés (notre variable principale) et les composantes principales`
+`Sans correction, les composantes principales "pèsent" beaucoup plus que la variable seule`
+
+```{r eval=FALSE, include=FALSE}
+cols_ext <- names(table_cp)[-c(1:6)]
+nb_var_ext <- length(cols_ext)
+
+coef_1 <- (nb_var_ext + 1) / 2
+coef_2  <- (nb_var_ext + 1) / (2 * nb_var_ext)
+
+table_cp$Residus_lisses <- table_cp$Residus_lisses * coef_1
+table_cp[cols_ext] <- table_cp[cols_ext] * coef_2
+```
+
+> CAH
+
+```{r}
+data_Cl <- scale(table_cp[,-c(1:5)])
+```
+
+```{r}
+dist_res <- dist(data_Cl)
+
+cah_res <- hclust(dist_res, method="ward.D2")
+```
+
+```{r}
+plot(cah_res)
+```
+
+```{r}
+inertie = sort(cah_res$height, decreasing=T)
+plot(inertie[1:20], type = "s", xlab = "Nombre de classes", ylab = "Inertie",lwd=2, main="Gain d'inertie en fonction du nombre de classes") ;grid()
+```
+
+> Association BV -> classe
+
+```{r}
+clusters <- cutree(cah_res, k=4)
+
+corres_bv_cluster <- data.frame(
+  CodeBV = table_cp$CodeBV,
+  Classe_CAH = clusters
+)
+```
+
+> Kmeans
+
+```{r eval=FALSE, include=FALSE}
+set.seed(123)
+
+km <- kmeans(data_Cl, centers=4, nstart=50)
+
+corres_bv_cluster2 <- data.frame(
+  CodeBV = table_cp$CodeBV,
+  Classe_Km = km$cluster
+)
+```
+
+> Ordonnancement des classes
+
+```{r}
+Base_sim2 <- merge(Base_sim, corres_bv_cluster, by='CodeBV', all.x=T)
+print(table(Base_sim2$Classe_CAH))
+```
+
+```{r}
+montant_classes <- aggregate(Mtt_total ~ Classe_CAH , data=Base_sim2, FUN=mean)
+print(montant_classes)
+```
+
+```{r}
+montant_classes <- montant_classes %>%
+  arrange(Mtt_total) %>%
+  mutate(Classe_CAH_ord = paste0(row_number(), ". moy=", round(Mtt_total, 2)))
+print(montant_classes)
+```
+
+> Fusion finale : cordonnees geographiques et classes
+
+```{r}
+coord <- res_agreg %>% select("CodeBV", "Latitude_barycentre", "Longitude_barycentre")
+
+coord$CodeBV <- factor(
+  ifelse(nchar(coord$CodeBV) == 4,
+         paste0("0", coord$CodeBV),
+         coord$CodeBV)
+)
+```
+
+```{r}
+data_zonier <- merge(coord, corres_bv_cluster, by='CodeBV') #, all.x=T
+```
+
+```{r}
+data_zonier <- merge(data_zonier, montant_classes, by='Classe_CAH', all.x=T)
+```
+
+```{r}
+print(table(data_zonier$Classe_CAH))
+print(table(data_zonier$Classe_CAH_ord))
+```
+
+
+## Représentation du zonier
+
+```{r}
+# NB : modifier en fct du nombre de classes
+nb_color <- c("yellow2", "red3", "blue", "black")
+
+
+ggplot(map_data("france"), aes(long, lat, group = group)) + 
+  geom_polygon( color = "black", alpha = 0.4, show.legend = FALSE) + 
+  geom_point(data = data_zonier, 
+             aes (Longitude_barycentre, Latitude_barycentre,
+                  color = as.factor(Classe_CAH_ord)), size=2.5,
+             inherit.aes = FALSE) +
+  scale_color_manual(values = nb_color) +
+  coord_quickmap() +
+  theme_void() +
+  labs(title = "Zonier soins hospitalisation", color = "Classe")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

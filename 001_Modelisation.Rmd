@@ -1,0 +1,348 @@
+---
+title: 'Modélisation'
+author: "SANON Korossin"
+date: "02/03/2026"
+output:
+  html_notebook: 
+    number_sections: yes
+  pdf_document: 
+    number_sections: yes
+  html_document: 
+    number_sections: yes
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+library(tidyverse)
+library(dplyr)
+library(questionr)
+library(ggplot2)
+library(caret)
+library(gbm)
+library(rpart)
+library(randomForest)
+```
+
+```{r}
+rm(list=ls())
+```
+
+## Modelisation du montant total : 
+
+```{r}
+Base_sim <- read.csv2("data_sim.csv", fileEncoding = "Latin1") # problème d'encodage à l'import
+
+Base_sim$sexe <- as.factor(Base_sim$sexe)
+Base_sim$qualite <- as.factor(Base_sim$qualite)
+Base_sim$codeGarantie <- as.factor(Base_sim$codeGarantie)
+```
+
+```{r}
+str(Base_sim)
+```
+
+### Analyse de correlation
+
+> Montant total
+
+```{r}
+
+hist(Base_sim$Mtt_total, breaks = 100, freq = TRUE, main = "Histogramme du montant total",
+     xlab = "montant total", ylab = "fréquence", col = "brown")
+```
+
+```{r}
+summary(Base_sim$Mtt_total)
+nrow(Base_sim[Base_sim$Mtt_total == 0,])/nrow(Base_sim)*100
+nrow(Base_sim[Base_sim$Mtt_total <= 30,])/nrow(Base_sim)*100
+```
+
+
+> Montant total et age
+
+```{r}
+summary(Base_sim$Age)
+
+# Corrélation
+cor(Base_sim$Mtt_total, Base_sim$Age, method = "spearman")
+```
+
+
+```{r}
+# Graphique
+ggplot(Base_sim, aes(x = Age, y = Mtt_total)) +
+  geom_point(alpha = 0.4, color = "steelblue") +
+  geom_smooth(method = "lm", color = "red", se = TRUE) +
+  labs(title = "Relation entre Age et Montant total", x = "Age", y = "Montant total") +
+  theme_minimal()
+```
+
+> Montant total et sexe
+
+```{r}
+# Univarié
+describe(Base_sim$sexe)
+
+# test de student
+t.test(Mtt_total ~ sexe, data = Base_sim)
+
+# Bivarié
+print(aggregate(Mtt_total ~ sexe, data = Base_sim, FUN = mean))
+```
+
+```{r}
+# boxplot
+ggplot(Base_sim, aes(x = sexe, y = Mtt_total, fill = sexe)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Montant total selon le sexe", x = "Sexe", y = "Montant total") +
+  scale_fill_manual(values = c("red","blue")) +
+  theme_minimal()
+```
+
+> Montant total et garantie
+
+```{r}
+# Univarié
+describe(Base_sim$codeGarantie)
+
+# test non parametrique de Kruskal-Wallis
+kruskal.test(Mtt_total ~ codeGarantie, data = Base_sim)
+
+# Bivarié
+print(aggregate(Mtt_total ~ codeGarantie, data = Base_sim, FUN = mean))
+```
+
+```{r}
+# boxplot
+ggplot(Base_sim, aes(x = codeGarantie, y = Mtt_total, fill = codeGarantie)) +
+  geom_boxplot() +
+  labs(title = "Montant total selon le type de garantie",
+       x = "Code garantie",
+       y = "Montant total") +
+  theme_minimal()
+```
+
+> Montant total et qualite
+
+```{r}
+# Univarié
+describe(Base_sim$qualite)
+
+# test non parametrique de Kruskal-Wallis
+kruskal.test(Mtt_total ~ qualite, data = Base_sim)
+
+# Bivarié
+print(aggregate(Mtt_total ~ qualite, data = Base_sim, FUN = mean))
+```
+
+```{r}
+# boxplot
+ggplot(Base_sim, aes(x = qualite, y = Mtt_total, fill = qualite)) +
+  geom_boxplot() +
+  labs(title = "Montant total selon la qualité",
+       x = "Qualité",
+       y = "Montant total") +
+  theme_minimal()
+```
+
+
+## Préparation des données
+
+```{r}
+nomcol_y <- "Mtt_total" 
+modele <- Mtt_total ~ sexe + Age + qualite + codeGarantie + Exposition
+
+data_mdl <- Base_sim
+data_mdl$Mtt_total[data_mdl$Mtt_total <= 0] <- 1
+
+set.seed(123)
+
+index_train <- createDataPartition(data_mdl$Mtt_total, p = 0.75, list = FALSE)
+
+train <- data_mdl[index_train, ]
+test  <- data_mdl[-index_train, ]
+```
+
+> Definition de la validation croisee
+
+```{r}
+ctrl <- trainControl(
+  method = "cv",
+  number = 5,
+  verboseIter = TRUE
+)
+```
+
+
+### Modélisation GLM
+
+```{r}
+glm_model <- train(
+  modele,
+  data = train,
+  method = "glm",
+  family = Gamma(link = "log"),
+  trControl = ctrl
+)
+```
+
+```{r}
+# Prediction
+pred_glm_test <- predict(glm_model, newdata = test)
+
+RMSE(pred_glm_test, test$Mtt_total)
+```
+
+
+### Machine Learning
+
+> Arbre de regression CART
+
+```{r}
+cart_model <- train(
+  modele,
+  data = train,
+  method = "rpart",
+  trControl = ctrl,
+  tuneLength = 20
+)
+
+cart_model$bestTune
+```
+
+> GBM
+
+```{r}
+grid_gbm <- expand.grid(
+  interaction.depth = 1:6,
+  n.trees = c(100,150,200),
+  shrinkage = c(0.01,0.05,0.1),
+  n.minobsinnode = 10
+)
+
+gbm_model <- train(
+  modele,
+  data = train,
+  method = "gbm",
+  trControl = ctrl,
+  tuneGrid = grid_gbm,
+  verbose = FALSE
+)
+
+gbm_model$bestTune
+```
+
+> Random forest
+
+```{r}
+grid_rf <- expand.grid(
+  mtry = 1:5
+)
+
+rf_model <- train(
+  modele,
+  data = train,
+  method = "rf",
+  trControl = ctrl,
+  tuneGrid = grid_rf,
+  ntree = 200,
+  importance = TRUE
+)
+
+rf_model$bestTune
+```
+
+
+### Comparaison des modèles
+
+> Interprétation de la figure
+
+On compare les performances des modèles de régression : **CART**, **GLM**, **RF (Random Forest)** et **GBM (Gradient Boosting Machine)** selon trois métriques : **MAE**, **RMSE** et **R²**.  
+
+MAE (Mean Absolute Error)
+
+- Le **MAE** mesure l’erreur moyenne absolue entre les prédictions et les valeurs réelles.  
+- **Plus le MAE est petit, meilleur est le modèle.**
+
+RMSE (Root Mean Squared Error)
+
+- Le **RMSE** mesure l’erreur quadratique moyenne, donc **pénalise davantage les grosses erreurs**.  
+- **Plus le RMSE est faible, meilleur est le modèle.**
+
+R² (Coefficient de détermination)
+
+- Le **R²** mesure la proportion de variance expliquée par le modèle.  
+- **Plus le R² est élevé (proche de 1), meilleur est le modèle.**
+
+
+```{r}
+results <- resamples(list(
+  GLM = glm_model,
+  CART = cart_model,
+  GBM = gbm_model,
+  RF = rf_model
+))
+
+summary(results)
+bwplot(results)
+```
+
+> Predictions sur test
+
+```{r}
+pred_cart_test <- predict(cart_model, test)
+pred_gbm_test  <- predict(gbm_model, test)
+pred_rf_test   <- predict(rf_model, test)
+```
+
+> Erreurs
+
+```{r}
+RMSE(pred_cart_test, test$Mtt_total)
+RMSE(pred_gbm_test, test$Mtt_total)
+RMSE(pred_rf_test, test$Mtt_total)
+```
+
+
+### Prédictions sur la base totale
+
+```{r}
+models <- list(
+  glm_Gamma  = glm_model,
+  cart = cart_model,
+  gbm  = gbm_model,
+  rf   = rf_model
+)
+
+predictions <- lapply(models, predict, newdata = data_mdl)
+
+error_frame <- data.frame(
+  CodeINSEE = data_mdl$CodeINSEE,
+  CodeBV    = data_mdl$CodeBV,
+  sapply(predictions, function(p) data_mdl$Mtt_total - p)
+)
+```
+
+> Verification de la performance globale
+
+```{r}
+
+RMSE(predict(glm_model,  newdata = data_mdl), data_mdl$Mtt_total)
+RMSE(predict(cart_model, newdata = data_mdl), data_mdl$Mtt_total)
+RMSE(predict(gbm_model,  newdata = data_mdl), data_mdl$Mtt_total)
+RMSE(predict(rf_model,   newdata = data_mdl), data_mdl$Mtt_total)
+```
+
+> Sauvegarde de la table pour la prochaine etape
+
+```{r}
+save(error_frame, file = "error_frame.RData")
+```
+
+
+
