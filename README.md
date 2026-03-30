@@ -166,3 +166,14 @@ Données sauvegardées à chaque étapes :
 
 ---
 
+## Images
+
+- img_mtt_total
+- img_performance_mdl
+- img_lissage1
+- img_lissage2
+- img_lissage3
+- img_zonier
+
+--- 
+
