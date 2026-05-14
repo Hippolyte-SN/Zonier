@@ -1,18 +1,4 @@
 # RStudio
 .Rproj.user/
 .Rhistory
-.RData
 .Ruserdata
-
-# Outputs générés (recréables par knit)
-*.nb.html
-*.html
-
-# Données intermédiaires R (recréables par exécution)
-*.RData
-
-# Fichiers de données brutes (volumineuses, à stocker séparément)
-data_sim.csv
-correspondance_code_insee_code_postal_codebv.csv
-Composition_communale.xlsx
-Variables_externes.xlsx
